@@ -1,5 +1,9 @@
+from datetime import date, datetime, timezone
+import json
 import os
-from datetime import datetime
+import urllib.parse
+import urllib.request
+import uuid
 from google import genai
 from google.genai import types
 import streamlit as st
@@ -11,90 +15,171 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# --- ESTILO VISUAL MÉDICO PROFESIONAL ---
+# --- ESTILO MÉDICO DE ALTO CONTRASTE (SIEMPRE LEGIBLE EN MODO OSCURO) ---
 st.markdown(
     """
     <style>
     .stApp {
-        background-color: #F4F8FB;
+        background-color: #F4F8FB !important;
+        color: #111827 !important;
+    }
+    .stApp p, .stApp li, .stApp span, .stApp label, .stApp h1, .stApp h2, .stApp h3, .stApp h4 {
+        color: #111827 !important;
     }
     .soap-header {
         background: linear-gradient(135deg, #0D47A1 0%, #1976D2 100%);
         padding: 1.4rem;
         border-radius: 14px;
-        color: white;
         text-align: center;
         margin-bottom: 1.2rem;
         box-shadow: 0 4px 12px rgba(13, 71, 161, 0.15);
     }
     .soap-header h1 {
-        color: white;
+        color: #FFFFFF !important;
         font-size: 1.65rem;
         margin: 0;
     }
     .soap-header p {
-        color: #E3F2FD;
+        color: #E3F2FD !important;
         font-size: 0.95rem;
         margin-top: 0.35rem;
         margin-bottom: 0;
     }
     .soap-card {
-        background-color: #FFFFFF;
+        background-color: #FFFFFF !important;
+        color: #111827 !important;
         padding: 1.25rem;
         border-radius: 12px;
         border-left: 5px solid #1976D2;
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
         margin-top: 1rem;
     }
-    div.stButton > button:first-child {
+    div.stButton > button:first-child, div.stDownloadButton > button:first-child {
         width: 100%;
         border-radius: 10px;
         font-weight: 600;
         padding: 0.65rem 1rem;
+        background-color: #1976D2 !important;
+        color: #FFFFFF !important;
+        border: none !important;
+    }
+    div.stButton > button:first-child p, div.stDownloadButton > button:first-child p {
+        color: #FFFFFF !important;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# --- BLOQUEO POR CONTRASEÑA ---
-CLAVE_ACCESO = st.secrets.get("APP_PASSWORD", "SOAP2026")
+# --- CONEXIÓN A SUPABASE (CONTROL DE LICENCIAS POR USUARIO) ---
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
+
+def supabase_request(method, path, payload=None):
+    url = f"{SUPABASE_URL}/rest/v1/{path}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+    data = json.dumps(payload).encode("utf-8") if payload else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        body = resp.read().decode("utf-8")
+        return json.loads(body) if body else []
+
+def validar_licencia(codigo):
+    codigo_limpio = codigo.strip()
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        if codigo_limpio == st.secrets.get("APP_PASSWORD", "SOAP2026"):
+            return True, "Usuario Autorizado", "local"
+        return False, "Código incorrecto.", None
+
+    encoded = urllib.parse.quote(codigo_limpio)
+    filas = supabase_request("GET", f"licencias?codigo_licencia=eq.{encoded}&select=*")
+    if not filas:
+        return False, "Código de licencia no encontrado.", None
+
+    lic = filas[0]
+    if not lic.get("activo"):
+        return False, "Esta licencia está suspendida o inactiva. Contacta al administrador.", None
+
+    vence = lic.get("fecha_vencimiento")
+    if vence and date.fromisoformat(vence) < date.today():
+        return False, f"Tu licencia venció el {vence}. Renueva tu suscripción.", None
+
+    token = str(uuid.uuid4())
+    ahora = datetime.now(timezone.utc).isoformat()
+    supabase_request(
+        "PATCH",
+        f"licencias?id=eq.{lic['id']}",
+        {"sesion_actual": token, "ultimo_acceso": ahora},
+    )
+    return True, lic.get("medico_nombre", "Médico Autorizado"), token
+
+def verificar_sesion_unica(codigo, token):
+    if not SUPABASE_URL or not SUPABASE_KEY or token == "local":
+        return True
+    try:
+        encoded = urllib.parse.quote(codigo.strip())
+        filas = supabase_request(
+            "GET", f"licencias?codigo_licencia=eq.{encoded}&select=activo,sesion_actual"
+        )
+        if not filas or not filas[0].get("activo"):
+            return False
+        return filas[0].get("sesion_actual") == token
+    except Exception:
+        return True
 
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
+    st.session_state.medico_nombre = ""
+    st.session_state.codigo_licencia = ""
+    st.session_state.sesion_token = ""
+
+if st.session_state.autenticado:
+    if not verificar_sesion_unica(
+        st.session_state.codigo_licencia, st.session_state.sesion_token
+    ):
+        st.session_state.autenticado = False
+        st.warning("Se inició sesión con esta licencia en otro dispositivo. Vuelve a ingresar.")
 
 if not st.session_state.autenticado:
     st.markdown(
         """
         <div class="soap-header">
             <h1>🔒 Sistema Clínico SOAP IA</h1>
-            <p>Acceso exclusivo para personal médico autorizado</p>
+            <p>Acceso exclusivo para personal médico con licencia activa</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    clave_ingresada = st.text_input("Ingresa tu código de acceso:", type="password")
+    clave_ingresada = st.text_input("Ingresa tu código de licencia:", type="password")
     if st.button("🔓 Ingresar al Sistema", type="primary"):
-        if clave_ingresada == CLAVE_ACCESO:
+        ok, msg, token = validar_licencia(clave_ingresada)
+        if ok:
             st.session_state.autenticado = True
+            st.session_state.medico_nombre = msg
+            st.session_state.codigo_licencia = clave_ingresada.strip()
+            st.session_state.sesion_token = token
             st.rerun()
         else:
-            st.error("Código incorrecto. Verifica e intenta de nuevo.")
+            st.error(msg)
     st.stop()
-# ------------------------------
+# -------------------------------------------------------------
 
 st.markdown(
-    """
+    f"""
     <div class="soap-header">
         <h1>🩺 Sistema Clínico SOAP Inteligente</h1>
-        <p>Asistente de documentación clínica por voz y texto</p>
+        <p>Sesión activa: {st.session_state.medico_nombre}</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
 api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
-
 if not api_key:
     st.error("Falta configurar GEMINI_API_KEY en Secrets.")
     st.stop()
@@ -156,11 +241,5 @@ if st.session_state.reporte_soap:
     st.markdown("### 📋 Reporte SOAP Generado")
     st.markdown(st.session_state.reporte_soap)
     st.markdown("</div>", unsafe_allow_html=True)
-
-    fecha_archivo = datetime.now().strftime("%Y%m%d_%H%M")
-    st.download_button(
-        label="📥 Descargar Nota SOAP (.txt)",
-        data=st.session_state.reporte_soap,
-        file_name=f"Nota_SOAP_{fecha_archivo}.txt",
-        mime="text/plain",
-    )
+    st.caption("Copia rápida con un toque:")
+    st.code(st.session_state.reporte_soap, language=None)
