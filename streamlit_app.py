@@ -205,7 +205,7 @@ if not api_key:
     st.error("Falta configurar GEMINI_API_KEY en Secrets.")
     st.stop()
 
-client = genai.Client(api_key=api_key, http_options={"api_version": "v1alpha"})
+client = genai.Client(vertexai=True, api_key=api_key)
 MODEL_NAME = "gemini-3.5-flash-lite"
 
 PROMPT_SOAP = (
