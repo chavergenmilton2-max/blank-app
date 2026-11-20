@@ -1,6 +1,6 @@
 streamlit
 google-generativeai
-websockets<15.0
+websockets<18.0
 supabase
 gspread
 oauth2client
