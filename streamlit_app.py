@@ -15,7 +15,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# --- ESTILO MÉDICO DE ALTO CONTRASTE (SIEMPRE LEGIBLE EN MODO OSCURO) ---
+# --- ESTILO MÉDICO LIMPIO ORIGINAL ---
 st.markdown(
     """
     <style>
@@ -25,6 +25,12 @@ st.markdown(
     }
     .stApp p, .stApp li, .stApp span, .stApp label, .stApp h1, .stApp h2, .stApp h3, .stApp h4 {
         color: #111827 !important;
+    }
+    .stTextArea textarea, .stTextInput input {
+        background-color: #FFFFFF !important;
+        color: #111827 !important;
+        border: 1px solid #CBD5E1 !important;
+        border-radius: 10px !important;
     }
     .soap-header {
         background: linear-gradient(135deg, #0D47A1 0%, #1976D2 100%);
@@ -54,16 +60,16 @@ st.markdown(
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
         margin-top: 1rem;
     }
-    div.stButton > button:first-child, div.stDownloadButton > button:first-child {
+    div.stButton > button:first-child {
         width: 100%;
         border-radius: 10px;
         font-weight: 600;
         padding: 0.65rem 1rem;
-        background-color: #1976D2 !important;
+        background-color: #C62828 !important;
         color: #FFFFFF !important;
         border: none !important;
     }
-    div.stButton > button:first-child p, div.stDownloadButton > button:first-child p {
+    div.stButton > button:first-child p {
         color: #FFFFFF !important;
     }
     </style>
@@ -72,51 +78,65 @@ st.markdown(
 )
 
 # --- CONEXIÓN A SUPABASE (CONTROL DE LICENCIAS POR USUARIO) ---
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "").strip()
+
 
 def supabase_request(method, path, payload=None):
     url = f"{SUPABASE_URL}/rest/v1/{path}"
     headers = {
         "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
         "Prefer": "return=representation",
     }
+    if SUPABASE_KEY.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
     data = json.dumps(payload).encode("utf-8") if payload else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=10) as resp:
         body = resp.read().decode("utf-8")
         return json.loads(body) if body else []
 
+
 def validar_licencia(codigo):
     codigo_limpio = codigo.strip()
+    clave_maestra = st.secrets.get("APP_PASSWORD", "SOAP2026")
+
     if not SUPABASE_URL or not SUPABASE_KEY:
-        if codigo_limpio == st.secrets.get("APP_PASSWORD", "SOAP2026"):
-            return True, "Usuario Autorizado", "local"
+        if codigo_limpio == clave_maestra:
+            return True, "Usuario Administrador", "local"
         return False, "Código incorrecto.", None
 
-    encoded = urllib.parse.quote(codigo_limpio)
-    filas = supabase_request("GET", f"licencias?codigo_licencia=eq.{encoded}&select=*")
-    if not filas:
-        return False, "Código de licencia no encontrado.", None
+    try:
+        encoded = urllib.parse.quote(codigo_limpio)
+        filas = supabase_request("GET", f"licencias?codigo_licencia=eq.{encoded}&select=*")
+        if not filas:
+            if codigo_limpio == clave_maestra:
+                return True, "Usuario Administrador", "local"
+            return False, "Código de licencia no encontrado.", None
 
-    lic = filas[0]
-    if not lic.get("activo"):
-        return False, "Esta licencia está suspendida o inactiva. Contacta al administrador.", None
+        lic = filas[0]
+        if not lic.get("activo"):
+            return False, "Esta licencia está suspendida o inactiva. Contacta al administrador.", None
 
-    vence = lic.get("fecha_vencimiento")
-    if vence and date.fromisoformat(vence) < date.today():
-        return False, f"Tu licencia venció el {vence}. Renueva tu suscripción.", None
+        vence = lic.get("fecha_vencimiento")
+        if vence and date.fromisoformat(vence) < date.today():
+            return False, f"Tu licencia venció el {vence}. Renueva tu suscripción.", None
 
-    token = str(uuid.uuid4())
-    ahora = datetime.now(timezone.utc).isoformat()
-    supabase_request(
-        "PATCH",
-        f"licencias?id=eq.{lic['id']}",
-        {"sesion_actual": token, "ultimo_acceso": ahora},
-    )
-    return True, lic.get("medico_nombre", "Médico Autorizado"), token
+        token = str(uuid.uuid4())
+        ahora = datetime.now(timezone.utc).isoformat()
+        supabase_request(
+            "PATCH",
+            f"licencias?id=eq.{lic['id']}",
+            {"sesion_actual": token, "ultimo_acceso": ahora},
+        )
+        return True, lic.get("medico_nombre", "Médico Autorizado"), token
+
+    except Exception:
+        if codigo_limpio == clave_maestra:
+            return True, "Usuario Administrador", "local"
+        return False, "No se pudo verificar la licencia. Intenta nuevamente.", None
+
 
 def verificar_sesion_unica(codigo, token):
     if not SUPABASE_URL or not SUPABASE_KEY or token == "local":
@@ -131,6 +151,7 @@ def verificar_sesion_unica(codigo, token):
         return filas[0].get("sesion_actual") == token
     except Exception:
         return True
+
 
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
@@ -150,12 +171,12 @@ if not st.session_state.autenticado:
         """
         <div class="soap-header">
             <h1>🔒 Sistema Clínico SOAP IA</h1>
-            <p>Acceso exclusivo para personal médico con licencia activa</p>
+            <p>Acceso exclusivo para personal médico autorizado</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    clave_ingresada = st.text_input("Ingresa tu código de licencia:", type="password")
+    clave_ingresada = st.text_input("Ingresa tu código de acceso:", type="password")
     if st.button("🔓 Ingresar al Sistema", type="primary"):
         ok, msg, token = validar_licencia(clave_ingresada)
         if ok:
@@ -170,10 +191,10 @@ if not st.session_state.autenticado:
 # -------------------------------------------------------------
 
 st.markdown(
-    f"""
+    """
     <div class="soap-header">
         <h1>🩺 Sistema Clínico SOAP Inteligente</h1>
-        <p>Sesión activa: {st.session_state.medico_nombre}</p>
+        <p>Asistente de documentación clínica por voz y texto</p>
     </div>
     """,
     unsafe_allow_html=True,
